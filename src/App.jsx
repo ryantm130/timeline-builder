@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { id:"project",   icon:"📋", label:"Project"    },
   { id:"view",      icon:"🎨", label:"View"        },
   { id:"tasks",     icon:"➕", label:"Add / Paste" },
+  { id:"lanes",     icon:"🏊", label:"Swimlanes"   },
   { id:"teams",     icon:"👥", label:"Teams"       },
   { id:"templates", icon:"📂", label:"Templates"   },
   { id:"export",    icon:"📤", label:"Export"      },
@@ -67,7 +68,8 @@ const BUILTIN_TEMPLATES = [
 ];
 
 // ─── Storage ─────────────────────────────────────────────────────────────────
-const LS = { tpl:"tl_tpl_v4", owners:"tl_owners_v4" };
+const LS = { tpl:"tl_tpl_v4", owners:"tl_owners_v4", lanes:"tl_lanes_v4" };
+const DEFAULT_LANES = ["Engineering","Regulatory","Clinical"];
 const loadLS = (k,fb) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):fb; } catch { return fb; } };
 const saveLS = (k,v) => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} };
 
@@ -181,9 +183,11 @@ export default function App() {
   const [pasteText,    setPasteText]    = useState("");
   const [pasteError,   setPasteError]   = useState("");
 
-  // Owner / template state
+  // Owner / template / lane state
   const [owners,          setOwners]         = useState(()=>loadLS(LS.owners,DEFAULT_OWNERS));
   const [newOwner,        setNewOwner]        = useState("");
+  const [laneDefs,        setLaneDefs]        = useState(()=>loadLS(LS.lanes,DEFAULT_LANES));
+  const [newLane,         setNewLane]         = useState("");
   const [savedTemplates,  setSavedTemplates]  = useState(()=>loadLS(LS.tpl,[]));
   const [tplName,         setTplName]         = useState("");
 
@@ -194,13 +198,20 @@ export default function App() {
   const inlineRef  = useRef();
 
   useEffect(()=>{ saveLS(LS.owners,owners); },[owners]);
+  useEffect(()=>{ saveLS(LS.lanes,laneDefs); },[laneDefs]);
   useEffect(()=>{ saveLS(LS.tpl,savedTemplates); },[savedTemplates]);
 
   // ── Derived ──────────────────────────────────────────────────────────────────
   const subRows  = useMemo(()=>assignSubRows(tasks),[tasks]);
   const colorMap = useMemo(()=>buildColorMap(tasks,colourMode==="rag"?"owner":colourMode),[tasks,colourMode]);
   const laneH    = useMemo(()=>laneHeights(tasks,subRows),[tasks,subRows]);
-  const lanes    = useMemo(()=>[...new Set(tasks.map(t=>t.lane))],[tasks]);
+  const lanes    = useMemo(()=>{
+    const fromTasks=[...new Set(tasks.map(t=>t.lane))];
+    // Maintain laneDefs order, then append any lanes from tasks not in defs
+    const ordered=[...laneDefs.filter(l=>fromTasks.includes(l)||true),
+      ...fromTasks.filter(l=>!laneDefs.includes(l))];
+    return [...new Set(ordered)];
+  },[tasks,laneDefs]);
   const SVG_W    = PAD_LEFT + totalDays*dayW + 16;
 
   const laneOffsets = useMemo(()=>{
@@ -258,24 +269,32 @@ export default function App() {
       if (d.type==="move") {
         const newStart = Math.max(0,d.origVal+dayDelta);
         setDragSnap(newStart);
-        setTasks(ts=>ts.map(t=>t.id!==d.id?t:{...t,start:newStart}));
-        // Auto-extend timeline
-        setTasks(ts=>{ const t=ts.find(x=>x.id===d.id); if(t&&t.start+t.dur>totalDays) setTotalDays(t.start+t.dur+2); return ts; });
+        // Single setTasks call — compute new tasks, then auto-extend as side effect
+        setTasks(ts=>{
+          const next = ts.map(t=>t.id!==d.id?t:{...t,start:newStart});
+          const moved = next.find(t=>t.id===d.id);
+          if (moved && moved.start+moved.dur > totalDays) setTotalDays(moved.start+moved.dur+2);
+          return next;
+        });
       } else if (d.type==="resize") {
         const newDur = Math.max(1,d.origVal+dayDelta);
         setDragSnap(newDur);
-        setTasks(ts=>ts.map(t=>t.id!==d.id?t:{...t,dur:newDur}));
-        setTasks(ts=>{ const t=ts.find(x=>x.id===d.id); if(t&&t.start+t.dur>totalDays) setTotalDays(t.start+t.dur+2); return ts; });
+        setTasks(ts=>{
+          const next = ts.map(t=>t.id!==d.id?t:{...t,dur:newDur});
+          const resized = next.find(t=>t.id===d.id);
+          if (resized && resized.start+resized.dur > totalDays) setTotalDays(resized.start+resized.dur+2);
+          return next;
+        });
       } else if (d.type==="milestone") {
         const newDay = Math.max(0,Math.min(totalDays,d.origVal+dayDelta));
         setDragSnap(newDay);
         setMilestones(ms=>ms.map(m=>m.id!==d.id?m:{...m,day:newDay}));
       }
     };
-    const onUp = e => {
+    const onUp = () => {
       const d=dragRef.current;
       if (d && !d.hasMoved) {
-        // It was a click, not a drag — select the task
+        // Was a clean click — toggle selection
         if (d.type==="move"||d.type==="resize") {
           setSelected(sel=>sel===d.id?null:d.id);
         }
@@ -330,13 +349,12 @@ export default function App() {
 
   const addTask = useCallback((lane,startDay)=>{
     const id=`t${Date.now()}`;
-    const newT={id,lane:lane||lanes[0]||"General",label:"New task",
+    const newT={id,lane:lane||laneDefs[0]||lanes[0]||"General",label:"New task",
       start:startDay||0,dur:3,owner:owners[0]||"",tag:"",pct:0,rag:"G"};
     setTasks(ts=>[...ts,newT]);
     setSelected(id);
-    // Start inline edit immediately
     setTimeout(()=>setInlineEdit({id,value:"New task"}),50);
-  },[lanes,owners,setTasks]);
+  },[laneDefs,lanes,owners,setTasks]);
 
   // ── Inline label edit ─────────────────────────────────────────────────────
   const commitInlineEdit = useCallback(()=>{
@@ -396,6 +414,15 @@ export default function App() {
   const addOwner=()=>{
     const o=newOwner.trim().toUpperCase(); if(!o||owners.includes(o)) return;
     setOwners(os=>[...os,o]); setNewOwner("");
+  };
+  const addLane=()=>{
+    const l=newLane.trim(); if(!l||laneDefs.includes(l)) return;
+    setLaneDefs(ls=>[...ls,l]); setNewLane("");
+  };
+  const removeLane=(name)=>{
+    setLaneDefs(ls=>ls.filter(l=>l!==name));
+    // Move orphaned tasks to first remaining lane
+    setTasks(ts=>ts.map(t=>t.lane===name?{...t,lane:laneDefs.filter(l=>l!==name)[0]||"General"}:t));
   };
   const shareURL=()=>{
     const encoded=encodeState({tasks,milestones,deps,totalDays,name:projectName,startDate});
@@ -526,6 +553,42 @@ export default function App() {
             <Btn onClick={handlePaste} accent small>Import</Btn>
             <Btn onClick={()=>{setPasteText("");setPasteError("");}} small>Clear</Btn>
           </div>
+        </div>
+      </div>);
+
+      case "lanes": return (<div>
+        <PanelTitle>Swimlanes</PanelTitle>
+        <p style={{fontSize:11,color:"#555",marginBottom:12,lineHeight:1.6}}>
+          Drag to reorder. Removing a lane moves its tasks to the first remaining lane.
+        </p>
+        <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:14}}>
+          {laneDefs.map((l,i)=>(
+            <div key={l} style={{display:"flex",alignItems:"center",gap:6,
+              background:"rgba(255,255,255,0.06)",borderRadius:7,padding:"6px 10px",
+              border:"0.5px solid rgba(255,255,255,0.08)"}}>
+              <span style={{color:"#555",fontSize:13,cursor:"grab",flexShrink:0}}>⠿</span>
+              <span style={{fontSize:12,color:"#ddd",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l}</span>
+              <div style={{display:"flex",gap:4,flexShrink:0}}>
+                <button onClick={()=>{ if(i===0)return; setLaneDefs(ls=>{const n=[...ls];[n[i-1],n[i]]=[n[i],n[i-1]];return n;}); }}
+                  disabled={i===0}
+                  style={{...miniBtn,opacity:i===0?0.25:1}}>↑</button>
+                <button onClick={()=>{ if(i===laneDefs.length-1)return; setLaneDefs(ls=>{const n=[...ls];[n[i],n[i+1]]=[n[i+1],n[i]];return n;}); }}
+                  disabled={i===laneDefs.length-1}
+                  style={{...miniBtn,opacity:i===laneDefs.length-1?0.25:1}}>↓</button>
+                {laneDefs.length>1&&(
+                  <button onClick={()=>removeLane(l)}
+                    style={{...miniBtn,color:"#ff8888",borderColor:"rgba(220,50,50,0.3)"}}>×</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <input value={newLane} onChange={e=>setNewLane(e.target.value)}
+            placeholder="New lane name…" maxLength={32}
+            onKeyDown={e=>e.key==="Enter"&&addLane()}
+            style={{...inputStyle,flex:1}}/>
+          <Btn onClick={addLane} accent small>Add</Btn>
         </div>
       </div>);
 
@@ -766,51 +829,51 @@ export default function App() {
                 const ty=yOfTask(t),   th=SUB_H-8;
                 const isSel=selected===t.id;
                 const pctW=Math.round(tw*(t.pct||0)/100);
-                const isEditing=inlineEdit?.id===t.id;
+                const resizeZone=Math.min(RESIZE_HIT,tw);
                 return (
                   <g key={t.id}
                     onMouseEnter={e=>{ if(!dragRef.current) setTooltip({x:e.clientX,y:e.clientY,task:t}); }}
                     onMouseLeave={()=>setTooltip(null)}
-                    onContextMenu={e=>openContextMenu(e,t.id)}>
+                    onContextMenu={e=>openContextMenu(e,t.id)}
+                    onDoubleClick={e=>{ e.stopPropagation(); setSelected(t.id); setInlineEdit({id:t.id,value:t.label}); }}>
 
-                    {/* Main bar — mouseDown starts drag; click vs drag resolved on mouseUp */}
-                    <rect x={tx} y={ty} width={tw-RESIZE_HIT} height={th} rx={5}
+                    {/* Full bar background */}
+                    <rect x={tx} y={ty} width={tw} height={th} rx={5}
                       fill={bg} opacity={isSel?1:0.86}
-                      stroke={isSel?"#1a1a1a":"transparent"} strokeWidth={isSel?1.5:0}
-                      style={{cursor:isSel?"grab":"pointer"}}
+                      stroke={isSel?"#1a1a1a":"transparent"} strokeWidth={isSel?1.5:0}/>
+
+                    {/* Move zone — left portion, pointer cursor */}
+                    <rect x={tx} y={ty} width={tw-resizeZone} height={th} rx={0}
+                      fill="transparent"
+                      style={{cursor:"grab"}}
                       onMouseDown={e=>{ e.stopPropagation(); startDrag(e,t.id,"move",t.start); }}/>
 
-                    {/* Right portion — resize handle, always on top */}
-                    <rect x={tx+tw-RESIZE_HIT} y={ty} width={RESIZE_HIT} height={th} rx={0}
-                      fill={bg} opacity={isSel?1:0.86}
-                      stroke={isSel?"#1a1a1a":"transparent"} strokeWidth={isSel?1.5:0}
+                    {/* Resize zone — right edge, ew-resize cursor */}
+                    <rect x={tx+tw-resizeZone} y={ty} width={resizeZone} height={th} rx={0}
+                      fill="transparent"
                       style={{cursor:"ew-resize"}}
                       onMouseDown={e=>{ e.stopPropagation(); startDrag(e,t.id,"resize",t.dur); }}/>
 
-                    {/* Grip lines on resize zone */}
-                    {isSel&&tw>20&&[0,2,4].map(off=>(
-                      <line key={off} x1={tx+tw-RESIZE_HIT+2+off} y1={ty+5}
-                        x2={tx+tw-RESIZE_HIT+2+off} y2={ty+th-5}
-                        stroke={tc} strokeWidth={1} opacity={0.5} style={{pointerEvents:"none"}}/>
+                    {/* Grip lines — visible when selected */}
+                    {isSel&&tw>24&&[0,2,4].map(off=>(
+                      <line key={off}
+                        x1={tx+tw-resizeZone+2+off} y1={ty+5}
+                        x2={tx+tw-resizeZone+2+off} y2={ty+th-5}
+                        stroke={tc} strokeWidth={1} opacity={0.45} style={{pointerEvents:"none"}}/>
                     ))}
 
                     {/* Completion bar */}
                     {pctW>0&&<rect x={tx} y={ty+th-4} width={pctW} height={4} rx={2}
                       fill={tc} opacity={0.4} style={{pointerEvents:"none"}}/>}
 
-                    {/* Label — inline editable on double-click */}
-                    {!isEditing&&tw>20&&(
+                    {/* Label */}
+                    {tw>20&&(
                       <text x={tx+7} y={ty+th/2+4} fontSize={10.5} fill={tc}
                         fontFamily="system-ui" fontWeight="500"
                         style={{pointerEvents:"none",userSelect:"none"}}>
                         {t.label.length>Math.floor(tw/7)?t.label.slice(0,Math.max(3,Math.floor(tw/7)-1))+"…":t.label}
                       </text>
                     )}
-
-                    {/* Invisible wide hit area for double-click to edit */}
-                    <rect x={tx} y={ty} width={tw} height={th} rx={5} fill="transparent"
-                      style={{pointerEvents:"none"}}
-                      onDoubleClick={e=>{ e.stopPropagation(); setSelected(t.id); setInlineEdit({id:t.id,value:t.label}); }}/>
                   </g>
                 );
               })}
@@ -900,7 +963,10 @@ export default function App() {
 
           <div style={{marginBottom:12}}>
             <label style={fieldLabelStyle}>Lane</label>
-            <input value={selectedTask.lane} onChange={e=>updateTask(selectedTask.id,"lane",e.target.value)} style={rightInputStyle}/>
+            <select value={selectedTask.lane} onChange={e=>updateTask(selectedTask.id,"lane",e.target.value)} style={rightInputStyle}>
+              {laneDefs.map(l=><option key={l} value={l}>{l}</option>)}
+              {!laneDefs.includes(selectedTask.lane)&&<option value={selectedTask.lane}>{selectedTask.lane}</option>}
+            </select>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
             <div>
@@ -1126,3 +1192,4 @@ const rightInputStyle={
 };
 const fieldLabelStyle={fontSize:10,color:"#aaa",display:"block",marginBottom:3,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.05em"};
 const codeStyle={background:"rgba(255,255,255,0.08)",padding:"1px 4px",borderRadius:3,fontSize:10,fontFamily:"monospace",color:"#888"};
+const miniBtn={fontSize:11,padding:"2px 6px",background:"rgba(255,255,255,0.07)",border:"0.5px solid rgba(255,255,255,0.1)",borderRadius:4,cursor:"pointer",color:"#aaa",fontFamily:"inherit"};
